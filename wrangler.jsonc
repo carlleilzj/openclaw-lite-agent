@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "openclaw-lite-agent",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-06-04",
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "MODEL_BASE_URL": "https://api.818339.xyz/v1",
+    "MODEL_NAME": "auto",
+    "ALLOWED_CHAT_ID": "7716247784"
+  }
+}
