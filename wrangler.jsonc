@@ -10,6 +10,13 @@
     "MODEL_BASE_URL": "https://api.818339.xyz/v1",
     "MODEL_NAME": "auto",
     "ALLOWED_CHAT_ID": "7716247784",
+    "ADMIN_CHAT_ID": "7716247784",
+    "CLOUDFLARE_ACCOUNT_ID": "a80ec2f63d2c32edf97d324fe0c01908",
+    "CLOUDFLARE_WORKER_NAME": "openclaw-lite-agent",
+    "WORKER_URL": "https://openclaw-lite-agent.carllei2003.workers.dev",
+    "GITHUB_REPO": "carlleilzj/openclaw-lite-agent",
+    "GITHUB_DEFAULT_REF": "main",
+    "GITHUB_DEPLOY_WORKFLOW": "deploy.yml",
     "TIME_ZONE": "Asia/Shanghai"
   },
   "kv_namespaces": [

@@ -1,0 +1,40 @@
+name: Deploy Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Deployment source
+        required: false
+        default: manual
+      requested_by:
+        description: Telegram chat id or operator
+        required: false
+        default: manual
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_ACCOUNT_ID: a80ec2f63d2c32edf97d324fe0c01908
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Check Worker syntax
+        run: npm run check
+
+      - name: Deploy Worker
+        run: npx wrangler deploy --x-autoconfig=false --keep-vars
