@@ -1,7 +1,10 @@
 const TELEGRAM_API = "https://api.telegram.org";
+const VERSION = "0.3.0";
 const DEFAULT_TIME_ZONE = "Asia/Shanghai";
 const MAX_MEMORY_ITEMS = 30;
 const MAX_REMINDERS = 50;
+const MAX_TODOS = 50;
+const MAX_BOOKMARKS = 50;
 const MAX_PAGE_CHARS = 12000;
 
 export default {
@@ -12,7 +15,7 @@ export default {
       return json({
         ok: true,
         service: "openclaw-lite-agent",
-        version: "0.2.0",
+        version: VERSION,
         endpoints: ["/telegram/webhook", "/health"]
       });
     }
@@ -20,6 +23,7 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       return json({
         ok: true,
+        version: VERSION,
         storage: Boolean(env.OPENCLAW_KV),
         search: getSearchProvider(env),
         timeZone: env.TIME_ZONE || DEFAULT_TIME_ZONE
@@ -110,6 +114,38 @@ async function routeMessage(env, chatId, text) {
     return cancelReminder(env, chatId, commandPayload(body));
   }
 
+  if (startsCommand(body, ["待办", "todo"])) {
+    return addTodo(env, chatId, commandPayload(body));
+  }
+
+  if (isCommand(body, ["待办列表", "查看待办", "todos"])) {
+    return listTodos(env, chatId);
+  }
+
+  if (startsCommand(body, ["完成", "完成待办", "done"])) {
+    return completeTodo(env, chatId, commandPayload(body));
+  }
+
+  if (startsCommand(body, ["删除待办", "取消待办", "todo_del"])) {
+    return deleteTodo(env, chatId, commandPayload(body));
+  }
+
+  if (startsCommand(body, ["收藏", "bookmark"])) {
+    return addBookmark(env, chatId, commandPayload(body));
+  }
+
+  if (isCommand(body, ["收藏夹", "收藏列表", "bookmarks"])) {
+    return listBookmarks(env, chatId);
+  }
+
+  if (startsCommand(body, ["删除收藏", "取消收藏", "bookmark_del"])) {
+    return deleteBookmark(env, chatId, commandPayload(body));
+  }
+
+  if (isCommand(body, ["复盘", "总览", "dashboard"])) {
+    return reviewState(env, chatId);
+  }
+
   if (startsCommand(body, ["搜索", "search"])) {
     return searchCommand(env, chatId, commandPayload(body));
   }
@@ -137,6 +173,14 @@ function helpText(env) {
     "提醒 <时间> <内容> - 添加提醒",
     "提醒列表 - 查看提醒",
     "取消提醒 <编号|全部> - 删除提醒",
+    "待办 <内容> - 添加待办",
+    "待办列表 - 查看待办",
+    "完成 <编号|全部> - 完成待办",
+    "删除待办 <编号|全部> - 删除待办",
+    "收藏 <链接> [备注] - 保存链接",
+    "收藏夹 - 查看收藏",
+    "删除收藏 <编号|全部> - 删除收藏",
+    "复盘 - 汇总记忆、待办、提醒和收藏",
     "搜索 <关键词> - 轻量搜索并总结",
     "网页 <链接> - 读取网页并总结",
     "",
@@ -144,6 +188,8 @@ function helpText(env) {
     "提醒 10分钟后 喝水",
     "提醒 明天 9:00 看部署状态",
     "提醒 2026-06-09 20:30 复盘策略",
+    "待办 检查 Cloudflare 日志",
+    "收藏 https://example.com 参考资料",
     "",
     `状态：记忆/提醒存储 ${storage}，搜索 ${search}。`
   ].join("\n");
@@ -153,16 +199,19 @@ async function statusText(env, chatId) {
   const state = await loadState(env, chatId);
   const pending = state.reminders.filter((item) => !item.sentAt).length;
   const due = state.reminders.filter((item) => !item.sentAt && Date.parse(item.dueAt) <= Date.now()).length;
+  const activeTodos = state.todos.filter((item) => !item.doneAt).length;
 
   return [
     "智能体状态",
-    `版本：0.2.0`,
+    `版本：${VERSION}`,
     `存储：${env.OPENCLAW_KV ? "Cloudflare KV 已启用" : "未配置持久化存储"}`,
     `搜索：${getSearchProvider(env) || "轻量 DuckDuckGo"}`,
     `时区：${env.TIME_ZONE || DEFAULT_TIME_ZONE}`,
     `记忆：${state.memories.length} 条`,
+    `待办：${activeTodos} 条`,
     `待提醒：${pending} 条`,
     `已到期未发送：${due} 条`,
+    `收藏：${state.bookmarks.length} 条`,
     `模型：${env.MODEL_NAME || "auto"}`
   ].join("\n");
 }
@@ -311,6 +360,203 @@ async function cancelReminder(env, chatId, target) {
   return before === state.reminders.length ? `没有找到提醒 #${id}。` : `已取消提醒 #${id}。`;
 }
 
+async function addTodo(env, chatId, text) {
+  if (!env.OPENCLAW_KV) {
+    return "待办存储未配置。请先在 Cloudflare 绑定 KV：OPENCLAW_KV。";
+  }
+  if (!text) {
+    return "用法：待办 <内容>";
+  }
+
+  const state = await loadState(env, chatId);
+  const todo = {
+    id: nextId(state.todos),
+    text: text.slice(0, 800),
+    createdAt: new Date().toISOString(),
+    doneAt: null
+  };
+
+  state.todos.push(todo);
+  state.todos = state.todos.slice(-MAX_TODOS);
+  await saveState(env, chatId, state);
+
+  return `已添加待办 #${todo.id}：${todo.text}`;
+}
+
+async function listTodos(env, chatId) {
+  const state = await loadState(env, chatId);
+  const active = state.todos.filter((item) => !item.doneAt);
+  if (!active.length) {
+    return "当前没有待办。用「待办 <内容>」添加。";
+  }
+
+  return [
+    "待办列表：",
+    ...active.map((item) => `#${item.id} ${item.text}`)
+  ].join("\n");
+}
+
+async function completeTodo(env, chatId, target) {
+  if (!env.OPENCLAW_KV) {
+    return "待办存储未配置，无法完成待办。";
+  }
+  if (!target) {
+    return "用法：完成 <编号|全部>";
+  }
+
+  const state = await loadState(env, chatId);
+  const now = new Date().toISOString();
+  if (target === "全部" || target.toLowerCase() === "all") {
+    let count = 0;
+    for (const item of state.todos) {
+      if (!item.doneAt) {
+        item.doneAt = now;
+        count += 1;
+      }
+    }
+    await saveState(env, chatId, state);
+    return `已完成 ${count} 条待办。`;
+  }
+
+  const id = Number(target.replace(/^#/, ""));
+  if (!Number.isInteger(id)) {
+    return "请提供待办编号，例如：完成 2";
+  }
+
+  const todo = state.todos.find((item) => item.id === id);
+  if (!todo) {
+    return `没有找到待办 #${id}。`;
+  }
+  if (todo.doneAt) {
+    return `待办 #${id} 之前已经完成。`;
+  }
+
+  todo.doneAt = now;
+  await saveState(env, chatId, state);
+  return `已完成待办 #${id}：${todo.text}`;
+}
+
+async function deleteTodo(env, chatId, target) {
+  if (!env.OPENCLAW_KV) {
+    return "待办存储未配置，无法删除待办。";
+  }
+  if (!target) {
+    return "用法：删除待办 <编号|全部>";
+  }
+
+  const state = await loadState(env, chatId);
+  if (target === "全部" || target.toLowerCase() === "all") {
+    const count = state.todos.length;
+    state.todos = [];
+    await saveState(env, chatId, state);
+    return `已删除 ${count} 条待办。`;
+  }
+
+  const id = Number(target.replace(/^#/, ""));
+  if (!Number.isInteger(id)) {
+    return "请提供待办编号，例如：删除待办 2";
+  }
+
+  const before = state.todos.length;
+  state.todos = state.todos.filter((item) => item.id !== id);
+  await saveState(env, chatId, state);
+  return before === state.todos.length ? `没有找到待办 #${id}。` : `已删除待办 #${id}。`;
+}
+
+async function addBookmark(env, chatId, input) {
+  if (!env.OPENCLAW_KV) {
+    return "收藏存储未配置。请先在 Cloudflare 绑定 KV：OPENCLAW_KV。";
+  }
+  const url = extractUrl(input);
+  if (!url) {
+    return "用法：收藏 <链接> [备注]";
+  }
+
+  const state = await loadState(env, chatId);
+  const note = cleanText(input.replace(url, "")).slice(0, 300);
+  const bookmark = {
+    id: nextId(state.bookmarks),
+    url,
+    note,
+    createdAt: new Date().toISOString()
+  };
+
+  state.bookmarks.push(bookmark);
+  state.bookmarks = state.bookmarks.slice(-MAX_BOOKMARKS);
+  await saveState(env, chatId, state);
+
+  return [`已收藏 #${bookmark.id}：${bookmark.url}`, note ? `备注：${note}` : ""].filter(Boolean).join("\n");
+}
+
+async function listBookmarks(env, chatId) {
+  const state = await loadState(env, chatId);
+  if (!state.bookmarks.length) {
+    return "当前没有收藏。用「收藏 <链接> [备注]」添加。";
+  }
+
+  return [
+    "收藏夹：",
+    ...state.bookmarks.slice(-20).map((item) => formatBookmarkLine(item))
+  ].join("\n");
+}
+
+async function deleteBookmark(env, chatId, target) {
+  if (!env.OPENCLAW_KV) {
+    return "收藏存储未配置，无法删除收藏。";
+  }
+  if (!target) {
+    return "用法：删除收藏 <编号|全部>";
+  }
+
+  const state = await loadState(env, chatId);
+  if (target === "全部" || target.toLowerCase() === "all") {
+    const count = state.bookmarks.length;
+    state.bookmarks = [];
+    await saveState(env, chatId, state);
+    return `已删除 ${count} 条收藏。`;
+  }
+
+  const id = Number(target.replace(/^#/, ""));
+  if (!Number.isInteger(id)) {
+    return "请提供收藏编号，例如：删除收藏 2";
+  }
+
+  const before = state.bookmarks.length;
+  state.bookmarks = state.bookmarks.filter((item) => item.id !== id);
+  await saveState(env, chatId, state);
+  return before === state.bookmarks.length ? `没有找到收藏 #${id}。` : `已删除收藏 #${id}。`;
+}
+
+async function reviewState(env, chatId) {
+  const state = await loadState(env, chatId);
+  const activeTodos = state.todos.filter((item) => !item.doneAt);
+  const pendingReminders = state.reminders
+    .filter((item) => !item.sentAt)
+    .sort((a, b) => Date.parse(a.dueAt) - Date.parse(b.dueAt));
+
+  if (!state.memories.length && !activeTodos.length && !pendingReminders.length && !state.bookmarks.length) {
+    return "当前没有可复盘内容。可以先用「记住」「待办」「提醒」「收藏」积累上下文。";
+  }
+
+  const snapshot = renderStateSnapshot(env, state);
+  try {
+    const summary = await askModel(env, {
+      userText: [
+        "请基于下面的个人状态做一次轻量复盘。",
+        "输出：1. 当前重点 2. 下一步行动 3. 可能遗漏的风险。",
+        "保持简洁，不要编造不存在的执行结果。",
+        "",
+        snapshot
+      ].join("\n"),
+      state
+    });
+    return summary || snapshot;
+  } catch (error) {
+    console.error(error);
+    return snapshot;
+  }
+}
+
 async function searchCommand(env, chatId, query) {
   if (!query) {
     return "用法：搜索 <关键词>";
@@ -379,6 +625,19 @@ async function askModel(env, { userText, state = null }) {
         .map((item) => `#${item.id} ${item.dueAt} ${item.text}`)
         .join("\n")
     : "无";
+  const todosText = state?.todos?.filter((item) => !item.doneAt).length
+    ? state.todos
+        .filter((item) => !item.doneAt)
+        .slice(0, 20)
+        .map((item) => `#${item.id} ${item.text}`)
+        .join("\n")
+    : "无";
+  const bookmarksText = state?.bookmarks?.length
+    ? state.bookmarks
+        .slice(-10)
+        .map((item) => formatBookmarkLine(item))
+        .join("\n")
+    : "无";
 
   const response = await fetch(`${env.MODEL_BASE_URL}/chat/completions`, {
     method: "POST",
@@ -395,13 +654,19 @@ async function askModel(env, { userText, state = null }) {
             "你是一个轻量云端 OpenClaw 智能体，通过 Telegram 为用户工作。",
             "默认使用中文，回答要准确、简洁、可执行。",
             "你不能假装已经执行外部操作。需要执行时，引导用户使用中文命令。",
-            "可用命令包括：帮助、状态、记住、记忆、忘记、提醒、提醒列表、取消提醒、搜索、网页。",
+            "可用命令包括：帮助、状态、记住、记忆、忘记、提醒、提醒列表、取消提醒、待办、待办列表、完成、删除待办、收藏、收藏夹、删除收藏、复盘、搜索、网页。",
             "",
             "用户记忆：",
             memoryText,
             "",
             "待提醒：",
-            remindersText
+            remindersText,
+            "",
+            "待办：",
+            todosText,
+            "",
+            "收藏：",
+            bookmarksText
           ].join("\n")
         },
         {
@@ -517,10 +782,39 @@ function renderSearchResults(results) {
   ].join("\n\n");
 }
 
+function renderStateSnapshot(env, state) {
+  const activeTodos = state.todos.filter((item) => !item.doneAt);
+  const pendingReminders = state.reminders
+    .filter((item) => !item.sentAt)
+    .sort((a, b) => Date.parse(a.dueAt) - Date.parse(b.dueAt));
+
+  return [
+    "轻量复盘",
+    "",
+    "记忆：",
+    state.memories.length ? state.memories.slice(-10).map((item) => `#${item.id} ${item.text}`).join("\n") : "无",
+    "",
+    "待办：",
+    activeTodos.length ? activeTodos.map((item) => `#${item.id} ${item.text}`).join("\n") : "无",
+    "",
+    "提醒：",
+    pendingReminders.length
+      ? pendingReminders.map((item) => `#${item.id} ${formatDate(item.dueAt, env.TIME_ZONE || DEFAULT_TIME_ZONE)} - ${item.text}`).join("\n")
+      : "无",
+    "",
+    "收藏：",
+    state.bookmarks.length ? state.bookmarks.slice(-10).map((item) => formatBookmarkLine(item)).join("\n") : "无"
+  ].join("\n");
+}
+
+function formatBookmarkLine(item) {
+  return [`#${item.id}`, item.note || "", item.url].filter(Boolean).join(" ");
+}
+
 async function fetchReadablePage(url) {
   const response = await fetch(url, {
     headers: {
-      "user-agent": "OpenClawLiteAgent/0.2 (+https://workers.cloudflare.com)"
+      "user-agent": `OpenClawLiteAgent/${VERSION} (+https://workers.cloudflare.com)`
     }
   });
   if (!response.ok) {
@@ -576,7 +870,7 @@ async function sendDueReminders(env) {
 }
 
 async function loadState(env, chatId) {
-  const fallback = { memories: [], reminders: [] };
+  const fallback = { memories: [], reminders: [], todos: [], bookmarks: [] };
   if (!env.OPENCLAW_KV) {
     return fallback;
   }
@@ -596,7 +890,9 @@ async function saveState(env, chatId, state) {
 function normalizeState(state) {
   return {
     memories: Array.isArray(state?.memories) ? state.memories : [],
-    reminders: Array.isArray(state?.reminders) ? state.reminders : []
+    reminders: Array.isArray(state?.reminders) ? state.reminders : [],
+    todos: Array.isArray(state?.todos) ? state.todos : [],
+    bookmarks: Array.isArray(state?.bookmarks) ? state.bookmarks : []
   };
 }
 

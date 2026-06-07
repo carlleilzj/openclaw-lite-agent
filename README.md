@@ -12,6 +12,14 @@ Lightweight Telegram agent for Cloudflare Workers. Commands are shown in Chinese
 - `提醒 <时间> <内容>` - add a reminder
 - `提醒列表` - list pending reminders
 - `取消提醒 <编号|全部>` - cancel reminders
+- `待办 <内容>` - add a todo
+- `待办列表` - list active todos
+- `完成 <编号|全部>` - mark todos done
+- `删除待办 <编号|全部>` - delete todos
+- `收藏 <链接> [备注]` - save a link
+- `收藏夹` - list saved links
+- `删除收藏 <编号|全部>` - delete saved links
+- `复盘` - summarize memories, todos, reminders, and bookmarks
 - `搜索 <关键词>` - lightweight web search and summary
 - `网页 <链接>` - fetch and summarize a web page
 
@@ -21,6 +29,15 @@ Reminder examples:
 提醒 10分钟后 喝水
 提醒 明天 9:00 看部署状态
 提醒 2026-06-09 20:30 复盘策略
+```
+
+Todo and bookmark examples:
+
+```text
+待办 检查 Cloudflare 日志
+完成 1
+收藏 https://developers.cloudflare.com/workers/ Workers 文档
+复盘
 ```
 
 ## Required Cloudflare secrets
