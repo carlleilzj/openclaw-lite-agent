@@ -32,6 +32,11 @@ Lightweight Telegram agent for Cloudflare Workers. Commands are shown in Chinese
 - `订阅周报 [周几] <时间>` - send the weekly report automatically
 - `取消周报` - stop the automatic weekly report
 - `订阅列表` - show report subscriptions
+- `查找 <关键词>` - search memories, todos, reminders, bookmarks, and logs
+- `备份 [备注]` - snapshot current personal state
+- `备份列表` - list recent state backups
+- `恢复备份 <编号>` - restore a backup
+- `删除备份 <编号|全部>` - delete backups
 - `搜索 <关键词>` - lightweight web search and summary
 - `网页 <链接>` - fetch and summarize a web page
 
@@ -64,6 +69,9 @@ Log and report examples:
 订阅日报 21:30
 订阅周报 周日 21:30
 订阅列表
+查找 Cloudflare
+备份 部署前
+备份列表
 ```
 
 ## Required Cloudflare secrets
@@ -80,7 +88,7 @@ Bind a Workers KV namespace as:
 
 - `OPENCLAW_KV`
 
-The agent uses KV for memories, reminders, and reminder delivery state.
+The agent uses KV for memories, reminders, todos, bookmarks, logs, report subscriptions, and recent state backups.
 
 ## Optional search secrets
 

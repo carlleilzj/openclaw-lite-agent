@@ -1,11 +1,13 @@
 const TELEGRAM_API = "https://api.telegram.org";
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 const DEFAULT_TIME_ZONE = "Asia/Shanghai";
 const MAX_MEMORY_ITEMS = 30;
 const MAX_REMINDERS = 50;
 const MAX_TODOS = 50;
 const MAX_BOOKMARKS = 50;
 const MAX_LOGS = 120;
+const MAX_BACKUPS = 5;
+const MAX_SEARCH_RESULTS = 20;
 const MAX_PAGE_CHARS = 12000;
 
 export default {
@@ -175,6 +177,26 @@ async function routeMessage(env, chatId, text) {
     return listReportSubscriptions(env, chatId);
   }
 
+  if (isCommand(body, ["备份列表", "查看备份", "backups"])) {
+    return listBackups(env, chatId);
+  }
+
+  if (startsCommand(body, ["恢复备份", "还原备份", "restore_backup"])) {
+    return restoreBackup(env, chatId, commandPayload(body));
+  }
+
+  if (startsCommand(body, ["删除备份", "清理备份", "backup_del"])) {
+    return deleteBackup(env, chatId, commandPayload(body));
+  }
+
+  if (startsCommand(body, ["备份", "创建备份", "backup"])) {
+    return createBackup(env, chatId, commandPayload(body));
+  }
+
+  if (startsCommand(body, ["查找", "检索", "find"])) {
+    return searchPersonalState(env, chatId, commandPayload(body));
+  }
+
   if (startsCommand(body, ["交易日志", "交易记录", "trade_log"])) {
     return addLog(env, chatId, "交易", commandPayload(body));
   }
@@ -242,6 +264,11 @@ function helpText(env) {
     "订阅周报 [周几] <时间> - 每周自动推送周报",
     "取消周报 - 关闭自动周报",
     "订阅列表 - 查看自动报告设置",
+    "查找 <关键词> - 检索记忆、待办、提醒、收藏和日志",
+    "备份 [备注] - 保存当前个人状态快照",
+    "备份列表 - 查看最近备份",
+    "恢复备份 <编号> - 恢复指定备份",
+    "删除备份 <编号|全部> - 删除备份",
     "搜索 <关键词> - 轻量搜索并总结",
     "网页 <链接> - 读取网页并总结",
     "",
@@ -255,6 +282,8 @@ function helpText(env) {
     "交易日志 BTC 观察到关键阻力位",
     "订阅日报 21:30",
     "订阅周报 周日 21:30",
+    "查找 Cloudflare",
+    "备份 部署前",
     "",
     `状态：记忆/提醒存储 ${storage}，搜索 ${search}。`
   ].join("\n");
@@ -283,6 +312,7 @@ async function statusText(env, chatId) {
     `今日日志：${todayLogs} 条`,
     `近 7 天日志：${weekLogs} 条`,
     `自动报告：${reportStatus}`,
+    `备份：${state.backups.length} 个`,
     `模型：${env.MODEL_NAME || "auto"}`
   ].join("\n");
 }
@@ -763,6 +793,122 @@ async function listReportSubscriptions(env, chatId) {
   return `自动报告设置：${renderReportSubscriptions(state.reports)}`;
 }
 
+async function searchPersonalState(env, chatId, query) {
+  if (!query) {
+    return "用法：查找 <关键词>\n例如：查找 Cloudflare";
+  }
+
+  const state = await loadState(env, chatId);
+  const results = buildPersonalSearchIndex(state, env.TIME_ZONE || DEFAULT_TIME_ZONE)
+    .filter((item) => matchesSearchQuery(item.searchText, query))
+    .slice(0, MAX_SEARCH_RESULTS);
+
+  if (!results.length) {
+    return `没有在个人状态里找到「${query}」。`;
+  }
+
+  return [
+    `个人状态检索：${query}`,
+    ...results.map((item, index) => `${index + 1}. ${formatPersonalSearchHit(item)}`)
+  ].join("\n");
+}
+
+async function createBackup(env, chatId, note) {
+  if (!env.OPENCLAW_KV) {
+    return "备份存储未配置。请先在 Cloudflare 绑定 KV：OPENCLAW_KV。";
+  }
+
+  const state = await loadState(env, chatId);
+  const backup = {
+    id: nextId(state.backups),
+    note: cleanText(note).slice(0, 120),
+    createdAt: new Date().toISOString(),
+    state: snapshotCoreState(state)
+  };
+
+  state.backups.push(backup);
+  state.backups = state.backups.slice(-MAX_BACKUPS);
+  await saveState(env, chatId, state);
+
+  return [
+    `已创建备份 #${backup.id}${backup.note ? `：${backup.note}` : ""}`,
+    renderBackupCounts(backup.state),
+    `最多保留最近 ${MAX_BACKUPS} 个备份。`
+  ].join("\n");
+}
+
+async function listBackups(env, chatId) {
+  const state = await loadState(env, chatId);
+  if (!state.backups.length) {
+    return "还没有备份。用「备份 [备注]」创建一个状态快照。";
+  }
+
+  const timeZone = env.TIME_ZONE || DEFAULT_TIME_ZONE;
+  return [
+    "最近备份：",
+    ...state.backups
+      .slice()
+      .reverse()
+      .map((item) => formatBackupLine(item, timeZone))
+  ].join("\n");
+}
+
+async function restoreBackup(env, chatId, target) {
+  if (!env.OPENCLAW_KV) {
+    return "备份存储未配置，无法恢复备份。";
+  }
+  const id = parseSingleId(target);
+  if (!id) {
+    return "用法：恢复备份 <编号>\n例如：恢复备份 1";
+  }
+
+  const state = await loadState(env, chatId);
+  const backup = state.backups.find((item) => item.id === id);
+  if (!backup) {
+    return `没有找到备份 #${id}。`;
+  }
+
+  const restored = {
+    ...snapshotCoreState(backup.state),
+    backups: state.backups
+  };
+  await saveState(env, chatId, restored);
+
+  return [
+    `已恢复备份 #${backup.id}${backup.note ? `：${backup.note}` : ""}`,
+    renderBackupCounts(restored),
+    "备份列表已保留。"
+  ].join("\n");
+}
+
+async function deleteBackup(env, chatId, target) {
+  if (!env.OPENCLAW_KV) {
+    return "备份存储未配置，无法删除备份。";
+  }
+  if (!target) {
+    return "用法：删除备份 <编号|全部>";
+  }
+
+  const state = await loadState(env, chatId);
+  if (target === "全部" || target.toLowerCase() === "all") {
+    const count = state.backups.length;
+    state.backups = [];
+    await saveState(env, chatId, state);
+    return `已删除 ${count} 个备份。`;
+  }
+
+  const ids = parseIdList(target);
+  if (!ids.length) {
+    return "请提供备份编号，例如：删除备份 2";
+  }
+
+  const before = state.backups.length;
+  state.backups = state.backups.filter((item) => !ids.includes(item.id));
+  await saveState(env, chatId, state);
+  const deleted = before - state.backups.length;
+  return deleted ? `已删除 ${deleted} 个备份。` : `没有找到备份：${ids.map((idValue) => `#${idValue}`).join(" ")}。`;
+}
+
 async function periodReport(env, chatId, period) {
   const state = await loadState(env, chatId);
   const timeZone = env.TIME_ZONE || DEFAULT_TIME_ZONE;
@@ -892,7 +1038,7 @@ async function askModel(env, { userText, state = null }) {
             "你是一个轻量云端 OpenClaw 智能体，通过 Telegram 为用户工作。",
             "默认使用中文，回答要准确、简洁、可执行。",
             "你不能假装已经执行外部操作。需要执行时，引导用户使用中文命令。",
-            "可用命令包括：帮助、状态、记住、记忆、忘记、提醒、提醒列表、取消提醒、待办、待办列表、完成、删除待办、收藏、收藏夹、删除收藏、复盘、搜索、网页。",
+            "可用命令包括：帮助、状态、记住、记忆、忘记、提醒、提醒列表、取消提醒、待办、待办列表、完成、删除待办、收藏、收藏夹、删除收藏、复盘、日志、日志列表、日报、周报、订阅日报、订阅周报、查找、备份、备份列表、恢复备份、删除备份、搜索、网页。",
             "",
             "用户记忆：",
             memoryText,
@@ -1021,6 +1167,127 @@ function renderSearchResults(results) {
     "搜索结果：",
     ...results.map((item, index) => `${index + 1}. ${item.title}\n${item.url}\n${item.snippet}`)
   ].join("\n\n");
+}
+
+function buildPersonalSearchIndex(state, timeZone) {
+  const items = [];
+
+  for (const item of state.memories) {
+    items.push({
+      type: "记忆",
+      id: item.id,
+      date: item.createdAt,
+      title: item.text,
+      searchText: [item.text, item.id, item.createdAt].join(" ")
+    });
+  }
+
+  for (const item of state.todos) {
+    const status = item.doneAt ? "已完成" : "待办";
+    items.push({
+      type: status,
+      id: item.id,
+      date: item.doneAt || item.createdAt,
+      title: item.text,
+      searchText: [status, item.text, item.id, item.createdAt, item.doneAt].join(" ")
+    });
+  }
+
+  for (const item of state.reminders) {
+    const status = item.sentAt ? "已提醒" : "待提醒";
+    items.push({
+      type: status,
+      id: item.id,
+      date: item.dueAt,
+      title: item.text,
+      extra: formatDate(item.dueAt, timeZone),
+      searchText: [status, item.text, item.id, item.dueAt, item.sentAt].join(" ")
+    });
+  }
+
+  for (const item of state.bookmarks) {
+    items.push({
+      type: "收藏",
+      id: item.id,
+      date: item.createdAt,
+      title: item.note || item.url,
+      extra: item.note ? item.url : "",
+      searchText: ["收藏", item.note, item.url, item.id, item.createdAt].join(" ")
+    });
+  }
+
+  for (const item of state.logs) {
+    items.push({
+      type: `${item.type || "通用"}日志`,
+      id: item.id,
+      date: item.createdAt,
+      title: item.text,
+      searchText: [item.type || "通用", "日志", item.text, item.id, item.createdAt].join(" ")
+    });
+  }
+
+  return items.sort((a, b) => Date.parse(b.date || 0) - Date.parse(a.date || 0));
+}
+
+function matchesSearchQuery(text, query) {
+  const haystack = String(text || "").toLowerCase();
+  const terms = String(query || "")
+    .toLowerCase()
+    .split(/\s+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return terms.length > 0 && terms.every((term) => haystack.includes(term));
+}
+
+function formatPersonalSearchHit(item) {
+  return [`[${item.type}] #${item.id}`, item.extra || "", item.title].filter(Boolean).join(" ");
+}
+
+function snapshotCoreState(state) {
+  return {
+    memories: cloneJson(Array.isArray(state?.memories) ? state.memories : []).slice(-MAX_MEMORY_ITEMS),
+    reminders: cloneJson(Array.isArray(state?.reminders) ? state.reminders : []).slice(-MAX_REMINDERS),
+    todos: cloneJson(Array.isArray(state?.todos) ? state.todos : []).slice(-MAX_TODOS),
+    bookmarks: cloneJson(Array.isArray(state?.bookmarks) ? state.bookmarks : []).slice(-MAX_BOOKMARKS),
+    logs: cloneJson(Array.isArray(state?.logs) ? state.logs : []).slice(-MAX_LOGS),
+    reports: normalizeReports(state?.reports)
+  };
+}
+
+function normalizeBackups(backups) {
+  if (!Array.isArray(backups)) {
+    return [];
+  }
+
+  return backups
+    .filter((item) => item && Number.isInteger(Number(item.id)) && item.state)
+    .map((item) => ({
+      id: Number(item.id),
+      note: cleanText(item.note).slice(0, 120),
+      createdAt: item.createdAt || new Date(0).toISOString(),
+      state: snapshotCoreState(item.state)
+    }))
+    .slice(-MAX_BACKUPS);
+}
+
+function formatBackupLine(item, timeZone) {
+  return [
+    `#${item.id}`,
+    formatDate(item.createdAt, timeZone),
+    item.note ? `- ${item.note}` : "",
+    `(${renderBackupCounts(item.state)})`
+  ].filter(Boolean).join(" ");
+}
+
+function renderBackupCounts(state) {
+  const value = snapshotCoreState(state);
+  return [
+    `记忆 ${value.memories.length}`,
+    `待办 ${value.todos.length}`,
+    `提醒 ${value.reminders.length}`,
+    `收藏 ${value.bookmarks.length}`,
+    `日志 ${value.logs.length}`
+  ].join(" / ");
 }
 
 function renderStateSnapshot(env, state) {
@@ -1354,7 +1621,7 @@ async function sendDueReports(env) {
 }
 
 async function loadState(env, chatId) {
-  const fallback = { memories: [], reminders: [], todos: [], bookmarks: [], logs: [], reports: defaultReports() };
+  const fallback = { memories: [], reminders: [], todos: [], bookmarks: [], logs: [], reports: defaultReports(), backups: [] };
   if (!env.OPENCLAW_KV) {
     return fallback;
   }
@@ -1378,7 +1645,8 @@ function normalizeState(state) {
     todos: Array.isArray(state?.todos) ? state.todos : [],
     bookmarks: Array.isArray(state?.bookmarks) ? state.bookmarks : [],
     logs: Array.isArray(state?.logs) ? state.logs : [],
-    reports: normalizeReports(state?.reports)
+    reports: normalizeReports(state?.reports),
+    backups: normalizeBackups(state?.backups)
   };
 }
 
@@ -1559,6 +1827,11 @@ function parseIdList(text) {
     .filter((id) => Number.isInteger(id));
 }
 
+function parseSingleId(text) {
+  const id = Number(String(text || "").trim().replace(/^#/, ""));
+  return Number.isInteger(id) && id > 0 ? id : 0;
+}
+
 function getSearchProvider(env) {
   if (env.BRAVE_API_KEY) {
     return "Brave Search";
@@ -1588,6 +1861,10 @@ function decodeHtml(text) {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, "\"")
     .replace(/&#39;/g, "'");
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function splitTelegramMessage(text) {
