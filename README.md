@@ -20,6 +20,13 @@ Lightweight Telegram agent for Cloudflare Workers. Commands are shown in Chinese
 - `收藏夹` - list saved links
 - `删除收藏 <编号|全部>` - delete saved links
 - `复盘` - summarize memories, todos, reminders, and bookmarks
+- `日志 <内容>` - add a general log entry
+- `项目日志 <内容>` - add a project log entry
+- `交易日志 <内容>` - add a trading observation
+- `日志列表 [项目|交易|通用]` - list recent logs
+- `删除日志 <编号|多个编号|全部>` - delete logs
+- `日报` - summarize today's logs and state
+- `周报` - summarize the last seven days
 - `搜索 <关键词>` - lightweight web search and summary
 - `网页 <链接>` - fetch and summarize a web page
 
@@ -38,6 +45,17 @@ Todo and bookmark examples:
 完成 1
 收藏 https://developers.cloudflare.com/workers/ Workers 文档
 复盘
+```
+
+Log and report examples:
+
+```text
+日志 修复了 Telegram webhook 命令路由
+项目日志 OpenClaw v0.4.0 增加日报和周报
+交易日志 BTC 观察到关键阻力位，等待确认
+日志列表 交易
+日报
+周报
 ```
 
 ## Required Cloudflare secrets

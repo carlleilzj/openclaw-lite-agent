@@ -1,10 +1,11 @@
 const TELEGRAM_API = "https://api.telegram.org";
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const DEFAULT_TIME_ZONE = "Asia/Shanghai";
 const MAX_MEMORY_ITEMS = 30;
 const MAX_REMINDERS = 50;
 const MAX_TODOS = 50;
 const MAX_BOOKMARKS = 50;
+const MAX_LOGS = 120;
 const MAX_PAGE_CHARS = 12000;
 
 export default {
@@ -146,6 +147,34 @@ async function routeMessage(env, chatId, text) {
     return reviewState(env, chatId);
   }
 
+  if (startsCommand(body, ["日志列表", "查看日志", "logs"])) {
+    return listLogs(env, chatId, commandPayload(body));
+  }
+
+  if (startsCommand(body, ["删除日志", "清理日志", "log_del"])) {
+    return deleteLog(env, chatId, commandPayload(body));
+  }
+
+  if (startsCommand(body, ["交易日志", "交易记录", "trade_log"])) {
+    return addLog(env, chatId, "交易", commandPayload(body));
+  }
+
+  if (startsCommand(body, ["项目日志", "项目记录", "project_log"])) {
+    return addLog(env, chatId, "项目", commandPayload(body));
+  }
+
+  if (startsCommand(body, ["日志", "记录", "log"])) {
+    return addLog(env, chatId, "通用", commandPayload(body));
+  }
+
+  if (isCommand(body, ["日报", "今日复盘", "daily"])) {
+    return periodReport(env, chatId, "day");
+  }
+
+  if (isCommand(body, ["周报", "本周复盘", "weekly"])) {
+    return periodReport(env, chatId, "week");
+  }
+
   if (startsCommand(body, ["搜索", "search"])) {
     return searchCommand(env, chatId, commandPayload(body));
   }
@@ -181,6 +210,13 @@ function helpText(env) {
     "收藏夹 - 查看收藏",
     "删除收藏 <编号|全部> - 删除收藏",
     "复盘 - 汇总记忆、待办、提醒和收藏",
+    "日志 <内容> - 记录一条通用日志",
+    "项目日志 <内容> - 记录项目进展",
+    "交易日志 <内容> - 记录交易观察",
+    "日志列表 [项目|交易|通用] - 查看近期日志",
+    "删除日志 <编号|多个编号|全部> - 删除日志",
+    "日报 - 生成今日摘要",
+    "周报 - 生成近 7 天摘要",
     "搜索 <关键词> - 轻量搜索并总结",
     "网页 <链接> - 读取网页并总结",
     "",
@@ -190,6 +226,8 @@ function helpText(env) {
     "提醒 2026-06-09 20:30 复盘策略",
     "待办 检查 Cloudflare 日志",
     "收藏 https://example.com 参考资料",
+    "项目日志 OpenClaw v0.4.0 增加日报",
+    "交易日志 BTC 观察到关键阻力位",
     "",
     `状态：记忆/提醒存储 ${storage}，搜索 ${search}。`
   ].join("\n");
@@ -200,6 +238,8 @@ async function statusText(env, chatId) {
   const pending = state.reminders.filter((item) => !item.sentAt).length;
   const due = state.reminders.filter((item) => !item.sentAt && Date.parse(item.dueAt) <= Date.now()).length;
   const activeTodos = state.todos.filter((item) => !item.doneAt).length;
+  const todayLogs = filterLogsByPeriod(state.logs, "day", env.TIME_ZONE || DEFAULT_TIME_ZONE).length;
+  const weekLogs = filterLogsByPeriod(state.logs, "week", env.TIME_ZONE || DEFAULT_TIME_ZONE).length;
 
   return [
     "智能体状态",
@@ -212,6 +252,8 @@ async function statusText(env, chatId) {
     `待提醒：${pending} 条`,
     `已到期未发送：${due} 条`,
     `收藏：${state.bookmarks.length} 条`,
+    `今日日志：${todayLogs} 条`,
+    `近 7 天日志：${weekLogs} 条`,
     `模型：${env.MODEL_NAME || "auto"}`
   ].join("\n");
 }
@@ -557,6 +599,105 @@ async function reviewState(env, chatId) {
   }
 }
 
+async function addLog(env, chatId, type, text) {
+  if (!env.OPENCLAW_KV) {
+    return "日志存储未配置。请先在 Cloudflare 绑定 KV：OPENCLAW_KV。";
+  }
+  if (!text) {
+    return type === "交易"
+      ? "用法：交易日志 <内容>"
+      : type === "项目"
+        ? "用法：项目日志 <内容>"
+        : "用法：日志 <内容>";
+  }
+
+  const state = await loadState(env, chatId);
+  const entry = {
+    id: nextId(state.logs),
+    type,
+    text: text.slice(0, 1000),
+    createdAt: new Date().toISOString()
+  };
+
+  state.logs.push(entry);
+  state.logs = state.logs.slice(-MAX_LOGS);
+  await saveState(env, chatId, state);
+
+  return `已记录${type}日志 #${entry.id}：${entry.text}`;
+}
+
+async function listLogs(env, chatId, filterText) {
+  const state = await loadState(env, chatId);
+  const type = parseLogType(filterText);
+  const logs = state.logs
+    .filter((item) => !type || item.type === type)
+    .slice(-20)
+    .reverse();
+
+  if (!logs.length) {
+    return type ? `还没有${type}日志。` : "还没有日志。用「日志 <内容>」添加。";
+  }
+
+  return [
+    type ? `${type}日志：` : "近期日志：",
+    ...logs.map((item) => formatLogLine(item, env.TIME_ZONE || DEFAULT_TIME_ZONE))
+  ].join("\n");
+}
+
+async function deleteLog(env, chatId, target) {
+  if (!env.OPENCLAW_KV) {
+    return "日志存储未配置，无法删除日志。";
+  }
+  if (!target) {
+    return "用法：删除日志 <编号|多个编号|全部>";
+  }
+
+  const state = await loadState(env, chatId);
+  if (target === "全部" || target.toLowerCase() === "all") {
+    const count = state.logs.length;
+    state.logs = [];
+    await saveState(env, chatId, state);
+    return `已删除 ${count} 条日志。`;
+  }
+
+  const ids = parseIdList(target);
+  if (!ids.length) {
+    return "请提供日志编号，例如：删除日志 3 或 删除日志 1,2,3";
+  }
+
+  const before = state.logs.length;
+  state.logs = state.logs.filter((item) => !ids.includes(item.id));
+  await saveState(env, chatId, state);
+  const deleted = before - state.logs.length;
+  return deleted ? `已删除 ${deleted} 条日志。` : `没有找到日志：${ids.map((id) => `#${id}`).join(" ")}。`;
+}
+
+async function periodReport(env, chatId, period) {
+  const state = await loadState(env, chatId);
+  const timeZone = env.TIME_ZONE || DEFAULT_TIME_ZONE;
+  const logs = filterLogsByPeriod(state.logs, period, timeZone);
+  const label = period === "day" ? "日报" : "周报";
+  const snapshot = renderPeriodSnapshot(env, state, logs, period);
+
+  try {
+    const summary = await askModel(env, {
+      userText: [
+        `请基于下面的状态和日志生成${label}。`,
+        period === "day" ? "范围：今天。" : "范围：近 7 天。",
+        "输出：1. 进展 2. 风险/问题 3. 下一步行动。",
+        "如果交易日志存在，请单独列出交易观察；不要编造收益、下单或执行结果。",
+        "",
+        snapshot
+      ].join("\n"),
+      state
+    });
+    return summary || snapshot;
+  } catch (error) {
+    console.error(error);
+    return snapshot;
+  }
+}
+
 async function searchCommand(env, chatId, query) {
   if (!query) {
     return "用法：搜索 <关键词>";
@@ -638,6 +779,12 @@ async function askModel(env, { userText, state = null }) {
         .map((item) => formatBookmarkLine(item))
         .join("\n")
     : "无";
+  const logsText = state?.logs?.length
+    ? state.logs
+        .slice(-12)
+        .map((item) => formatLogLine(item, env.TIME_ZONE || DEFAULT_TIME_ZONE))
+        .join("\n")
+    : "无";
 
   const response = await fetch(`${env.MODEL_BASE_URL}/chat/completions`, {
     method: "POST",
@@ -666,7 +813,10 @@ async function askModel(env, { userText, state = null }) {
             todosText,
             "",
             "收藏：",
-            bookmarksText
+            bookmarksText,
+            "",
+            "近期日志：",
+            logsText
           ].join("\n")
         },
         {
@@ -803,12 +953,99 @@ function renderStateSnapshot(env, state) {
       : "无",
     "",
     "收藏：",
+    state.bookmarks.length ? state.bookmarks.slice(-10).map((item) => formatBookmarkLine(item)).join("\n") : "无",
+    "",
+    "近期日志：",
+    state.logs.length
+      ? state.logs.slice(-12).map((item) => formatLogLine(item, env.TIME_ZONE || DEFAULT_TIME_ZONE)).join("\n")
+      : "无"
+  ].join("\n");
+}
+
+function renderPeriodSnapshot(env, state, logs, period) {
+  const timeZone = env.TIME_ZONE || DEFAULT_TIME_ZONE;
+  const activeTodos = state.todos.filter((item) => !item.doneAt);
+  const pendingReminders = state.reminders
+    .filter((item) => !item.sentAt)
+    .sort((a, b) => Date.parse(a.dueAt) - Date.parse(b.dueAt));
+  const tradeLogs = logs.filter((item) => item.type === "交易");
+  const projectLogs = logs.filter((item) => item.type === "项目");
+  const generalLogs = logs.filter((item) => item.type === "通用");
+
+  return [
+    period === "day" ? `日报 ${dayKey(new Date(), timeZone)}` : `周报 近 7 天`,
+    "",
+    "日志：",
+    logs.length ? logs.map((item) => formatLogLine(item, timeZone)).join("\n") : "无",
+    "",
+    "项目日志：",
+    projectLogs.length ? projectLogs.map((item) => formatLogLine(item, timeZone)).join("\n") : "无",
+    "",
+    "交易日志：",
+    tradeLogs.length ? tradeLogs.map((item) => formatLogLine(item, timeZone)).join("\n") : "无",
+    "",
+    "通用日志：",
+    generalLogs.length ? generalLogs.map((item) => formatLogLine(item, timeZone)).join("\n") : "无",
+    "",
+    "待办：",
+    activeTodos.length ? activeTodos.map((item) => `#${item.id} ${item.text}`).join("\n") : "无",
+    "",
+    "待提醒：",
+    pendingReminders.length
+      ? pendingReminders.map((item) => `#${item.id} ${formatDate(item.dueAt, timeZone)} - ${item.text}`).join("\n")
+      : "无",
+    "",
+    "记忆：",
+    state.memories.length ? state.memories.slice(-10).map((item) => `#${item.id} ${item.text}`).join("\n") : "无",
+    "",
+    "收藏：",
     state.bookmarks.length ? state.bookmarks.slice(-10).map((item) => formatBookmarkLine(item)).join("\n") : "无"
   ].join("\n");
 }
 
 function formatBookmarkLine(item) {
   return [`#${item.id}`, item.note || "", item.url].filter(Boolean).join(" ");
+}
+
+function formatLogLine(item, timeZone) {
+  return `#${item.id} [${item.type || "通用"}] ${formatDate(item.createdAt, timeZone)} - ${item.text}`;
+}
+
+function parseLogType(text) {
+  const value = String(text || "").trim();
+  if (!value) {
+    return "";
+  }
+  if (value.includes("交易")) {
+    return "交易";
+  }
+  if (value.includes("项目")) {
+    return "项目";
+  }
+  if (value.includes("通用")) {
+    return "通用";
+  }
+  return "";
+}
+
+function filterLogsByPeriod(logs, period, timeZone) {
+  const items = Array.isArray(logs) ? logs : [];
+  if (period === "day") {
+    const today = dayKey(new Date(), timeZone);
+    return items.filter((item) => dayKey(item.createdAt, timeZone) === today);
+  }
+
+  const lowerBound = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  return items.filter((item) => Date.parse(item.createdAt) >= lowerBound);
+}
+
+function dayKey(value, timeZone) {
+  const parts = getZonedParts(new Date(value), timeZone);
+  return [
+    String(parts.year),
+    String(parts.month).padStart(2, "0"),
+    String(parts.day).padStart(2, "0")
+  ].join("-");
 }
 
 async function fetchReadablePage(url) {
@@ -870,7 +1107,7 @@ async function sendDueReminders(env) {
 }
 
 async function loadState(env, chatId) {
-  const fallback = { memories: [], reminders: [], todos: [], bookmarks: [] };
+  const fallback = { memories: [], reminders: [], todos: [], bookmarks: [], logs: [] };
   if (!env.OPENCLAW_KV) {
     return fallback;
   }
@@ -892,7 +1129,8 @@ function normalizeState(state) {
     memories: Array.isArray(state?.memories) ? state.memories : [],
     reminders: Array.isArray(state?.reminders) ? state.reminders : [],
     todos: Array.isArray(state?.todos) ? state.todos : [],
-    bookmarks: Array.isArray(state?.bookmarks) ? state.bookmarks : []
+    bookmarks: Array.isArray(state?.bookmarks) ? state.bookmarks : [],
+    logs: Array.isArray(state?.logs) ? state.logs : []
   };
 }
 
@@ -1064,6 +1302,13 @@ function commandPayload(text) {
 
 function nextId(items) {
   return items.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) + 1;
+}
+
+function parseIdList(text) {
+  return String(text || "")
+    .split(/[,\s，、]+/)
+    .map((item) => Number(item.replace(/^#/, "")))
+    .filter((id) => Number.isInteger(id));
 }
 
 function getSearchProvider(env) {
