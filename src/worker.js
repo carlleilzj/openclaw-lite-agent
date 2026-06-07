@@ -1,5 +1,5 @@
 const TELEGRAM_API = "https://api.telegram.org";
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const DEFAULT_TIME_ZONE = "Asia/Shanghai";
 const MAX_MEMORY_ITEMS = 30;
 const MAX_REMINDERS = 50;
@@ -39,7 +39,7 @@ export default {
   },
 
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(sendDueReminders(env));
+    ctx.waitUntil(runScheduledJobs(env));
   }
 };
 
@@ -67,7 +67,7 @@ async function handleTelegramWebhook(request, env, ctx) {
   }
 
   try {
-    ctx?.waitUntil?.(sendDueReminders(env));
+    ctx?.waitUntil?.(runScheduledJobs(env));
     await sendTelegramChatAction(env, chatId, "typing");
 
     const response = await routeMessage(env, chatId, text);
@@ -155,6 +155,26 @@ async function routeMessage(env, chatId, text) {
     return deleteLog(env, chatId, commandPayload(body));
   }
 
+  if (startsCommand(body, ["订阅日报", "日报订阅", "开启日报", "自动日报", "daily_subscribe"])) {
+    return subscribeDailyReport(env, chatId, commandPayload(body));
+  }
+
+  if (isCommand(body, ["取消日报", "关闭日报", "取消自动日报", "daily_unsubscribe"])) {
+    return unsubscribeReport(env, chatId, "daily");
+  }
+
+  if (startsCommand(body, ["订阅周报", "周报订阅", "开启周报", "自动周报", "weekly_subscribe"])) {
+    return subscribeWeeklyReport(env, chatId, commandPayload(body));
+  }
+
+  if (isCommand(body, ["取消周报", "关闭周报", "取消自动周报", "weekly_unsubscribe"])) {
+    return unsubscribeReport(env, chatId, "weekly");
+  }
+
+  if (isCommand(body, ["订阅列表", "报告订阅", "报告设置", "subscriptions"])) {
+    return listReportSubscriptions(env, chatId);
+  }
+
   if (startsCommand(body, ["交易日志", "交易记录", "trade_log"])) {
     return addLog(env, chatId, "交易", commandPayload(body));
   }
@@ -217,6 +237,11 @@ function helpText(env) {
     "删除日志 <编号|多个编号|全部> - 删除日志",
     "日报 - 生成今日摘要",
     "周报 - 生成近 7 天摘要",
+    "订阅日报 <时间> - 每天自动推送日报",
+    "取消日报 - 关闭自动日报",
+    "订阅周报 [周几] <时间> - 每周自动推送周报",
+    "取消周报 - 关闭自动周报",
+    "订阅列表 - 查看自动报告设置",
     "搜索 <关键词> - 轻量搜索并总结",
     "网页 <链接> - 读取网页并总结",
     "",
@@ -228,6 +253,8 @@ function helpText(env) {
     "收藏 https://example.com 参考资料",
     "项目日志 OpenClaw v0.4.0 增加日报",
     "交易日志 BTC 观察到关键阻力位",
+    "订阅日报 21:30",
+    "订阅周报 周日 21:30",
     "",
     `状态：记忆/提醒存储 ${storage}，搜索 ${search}。`
   ].join("\n");
@@ -240,6 +267,7 @@ async function statusText(env, chatId) {
   const activeTodos = state.todos.filter((item) => !item.doneAt).length;
   const todayLogs = filterLogsByPeriod(state.logs, "day", env.TIME_ZONE || DEFAULT_TIME_ZONE).length;
   const weekLogs = filterLogsByPeriod(state.logs, "week", env.TIME_ZONE || DEFAULT_TIME_ZONE).length;
+  const reportStatus = renderReportSubscriptions(state.reports);
 
   return [
     "智能体状态",
@@ -254,6 +282,7 @@ async function statusText(env, chatId) {
     `收藏：${state.bookmarks.length} 条`,
     `今日日志：${todayLogs} 条`,
     `近 7 天日志：${weekLogs} 条`,
+    `自动报告：${reportStatus}`,
     `模型：${env.MODEL_NAME || "auto"}`
   ].join("\n");
 }
@@ -672,6 +701,68 @@ async function deleteLog(env, chatId, target) {
   return deleted ? `已删除 ${deleted} 条日志。` : `没有找到日志：${ids.map((id) => `#${id}`).join(" ")}。`;
 }
 
+async function subscribeDailyReport(env, chatId, input) {
+  if (!env.OPENCLAW_KV) {
+    return "报告订阅存储未配置。请先在 Cloudflare 绑定 KV：OPENCLAW_KV。";
+  }
+
+  const time = parseTimeOfDay(input || "21:30");
+  if (!time) {
+    return "用法：订阅日报 <时间>\n例如：订阅日报 21:30";
+  }
+
+  const state = await loadState(env, chatId);
+  state.reports.daily = {
+    enabled: true,
+    hour: time.hour,
+    minute: time.minute,
+    lastSentKey: state.reports.daily.lastSentKey || ""
+  };
+  await saveState(env, chatId, state);
+
+  return `已订阅自动日报：每天 ${formatTimeOfDay(time)}。`;
+}
+
+async function subscribeWeeklyReport(env, chatId, input) {
+  if (!env.OPENCLAW_KV) {
+    return "报告订阅存储未配置。请先在 Cloudflare 绑定 KV：OPENCLAW_KV。";
+  }
+
+  const weekday = parseWeekday(input);
+  const time = parseTimeOfDay(input || "周日 21:30");
+  if (!time) {
+    return "用法：订阅周报 [周几] <时间>\n例如：订阅周报 周日 21:30";
+  }
+
+  const state = await loadState(env, chatId);
+  state.reports.weekly = {
+    enabled: true,
+    weekday: weekday ?? 0,
+    hour: time.hour,
+    minute: time.minute,
+    lastSentKey: state.reports.weekly.lastSentKey || ""
+  };
+  await saveState(env, chatId, state);
+
+  return `已订阅自动周报：每${formatWeekday(state.reports.weekly.weekday)} ${formatTimeOfDay(time)}。`;
+}
+
+async function unsubscribeReport(env, chatId, type) {
+  if (!env.OPENCLAW_KV) {
+    return "报告订阅存储未配置，无法取消订阅。";
+  }
+
+  const state = await loadState(env, chatId);
+  state.reports[type].enabled = false;
+  await saveState(env, chatId, state);
+  return type === "daily" ? "已取消自动日报。" : "已取消自动周报。";
+}
+
+async function listReportSubscriptions(env, chatId) {
+  const state = await loadState(env, chatId);
+  return `自动报告设置：${renderReportSubscriptions(state.reports)}`;
+}
+
 async function periodReport(env, chatId, period) {
   const state = await loadState(env, chatId);
   const timeZone = env.TIME_ZONE || DEFAULT_TIME_ZONE;
@@ -1039,6 +1130,118 @@ function filterLogsByPeriod(logs, period, timeZone) {
   return items.filter((item) => Date.parse(item.createdAt) >= lowerBound);
 }
 
+function defaultReports() {
+  return {
+    daily: { enabled: false, hour: 21, minute: 30, lastSentKey: "" },
+    weekly: { enabled: false, weekday: 0, hour: 21, minute: 30, lastSentKey: "" }
+  };
+}
+
+function normalizeReports(reports) {
+  const defaults = defaultReports();
+  return {
+    daily: {
+      ...defaults.daily,
+      ...(reports?.daily || {}),
+      enabled: Boolean(reports?.daily?.enabled)
+    },
+    weekly: {
+      ...defaults.weekly,
+      ...(reports?.weekly || {}),
+      enabled: Boolean(reports?.weekly?.enabled),
+      weekday: normalizeWeekday(reports?.weekly?.weekday ?? defaults.weekly.weekday)
+    }
+  };
+}
+
+function shouldSendDailyReport(report, now, timeZone) {
+  if (!report?.enabled || !isReportTimeDue(report, now, timeZone)) {
+    return false;
+  }
+  return report.lastSentKey !== dayKey(now, timeZone);
+}
+
+function shouldSendWeeklyReport(report, now, timeZone) {
+  if (!report?.enabled || currentWeekday(now, timeZone) !== report.weekday || !isReportTimeDue(report, now, timeZone)) {
+    return false;
+  }
+  return report.lastSentKey !== `week:${dayKey(now, timeZone)}`;
+}
+
+function isReportTimeDue(report, now, timeZone) {
+  const parts = getZonedParts(now, timeZone);
+  const currentMinutes = parts.hour * 60 + parts.minute;
+  const targetMinutes = Number(report.hour) * 60 + Number(report.minute || 0);
+  return currentMinutes >= targetMinutes;
+}
+
+function renderReportSubscriptions(reports) {
+  const value = normalizeReports(reports);
+  const daily = value.daily.enabled ? `日报每天 ${formatTimeOfDay(value.daily)}` : "日报关闭";
+  const weekly = value.weekly.enabled ? `周报每${formatWeekday(value.weekly.weekday)} ${formatTimeOfDay(value.weekly)}` : "周报关闭";
+  return `${daily}；${weekly}`;
+}
+
+function parseTimeOfDay(input) {
+  const match = String(input || "").match(/(\d{1,2})(?:[:：点时](\d{1,2})?)?/);
+  if (!match) {
+    return null;
+  }
+
+  const hour = Number(match[1]);
+  const minute = Number(match[2] || "0");
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+    return null;
+  }
+  return { hour, minute };
+}
+
+function parseWeekday(input) {
+  const value = String(input || "");
+  const match = value.match(/(?:周|星期|礼拜)([一二三四五六日天1-7])/);
+  if (!match) {
+    return null;
+  }
+  return normalizeWeekday({
+    日: 0,
+    天: 0,
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
+    "6": 6,
+    "7": 0
+  }[match[1]]);
+}
+
+function normalizeWeekday(value) {
+  const weekday = Number(value);
+  if (!Number.isInteger(weekday)) {
+    return 0;
+  }
+  return ((weekday % 7) + 7) % 7;
+}
+
+function currentWeekday(value, timeZone) {
+  const name = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" }).format(new Date(value));
+  return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[name] ?? 0;
+}
+
+function formatTimeOfDay(value) {
+  return `${String(value.hour).padStart(2, "0")}:${String(value.minute || 0).padStart(2, "0")}`;
+}
+
+function formatWeekday(value) {
+  return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][normalizeWeekday(value)];
+}
+
 function dayKey(value, timeZone) {
   const parts = getZonedParts(new Date(value), timeZone);
   return [
@@ -1078,6 +1281,11 @@ async function fetchReadablePage(url) {
   return { title, text };
 }
 
+async function runScheduledJobs(env) {
+  await sendDueReminders(env);
+  await sendDueReports(env);
+}
+
 async function sendDueReminders(env) {
   if (!env.OPENCLAW_KV) {
     return;
@@ -1106,8 +1314,47 @@ async function sendDueReminders(env) {
   }
 }
 
+async function sendDueReports(env) {
+  if (!env.OPENCLAW_KV) {
+    return;
+  }
+
+  const now = new Date();
+  const timeZone = env.TIME_ZONE || DEFAULT_TIME_ZONE;
+  const list = await env.OPENCLAW_KV.list({ prefix: "chat:" });
+  for (const key of list.keys) {
+    if (!key.name.endsWith(":state")) {
+      continue;
+    }
+
+    const chatId = key.name.slice("chat:".length, -":state".length);
+    const state = await loadState(env, chatId);
+    let changed = false;
+
+    if (shouldSendDailyReport(state.reports.daily, now, timeZone)) {
+      const keyValue = dayKey(now, timeZone);
+      const report = await periodReport(env, chatId, "day");
+      await sendTelegramMessage(env, chatId, `自动日报\n\n${report}`);
+      state.reports.daily.lastSentKey = keyValue;
+      changed = true;
+    }
+
+    if (shouldSendWeeklyReport(state.reports.weekly, now, timeZone)) {
+      const keyValue = `week:${dayKey(now, timeZone)}`;
+      const report = await periodReport(env, chatId, "week");
+      await sendTelegramMessage(env, chatId, `自动周报\n\n${report}`);
+      state.reports.weekly.lastSentKey = keyValue;
+      changed = true;
+    }
+
+    if (changed) {
+      await saveState(env, chatId, state);
+    }
+  }
+}
+
 async function loadState(env, chatId) {
-  const fallback = { memories: [], reminders: [], todos: [], bookmarks: [], logs: [] };
+  const fallback = { memories: [], reminders: [], todos: [], bookmarks: [], logs: [], reports: defaultReports() };
   if (!env.OPENCLAW_KV) {
     return fallback;
   }
@@ -1130,7 +1377,8 @@ function normalizeState(state) {
     reminders: Array.isArray(state?.reminders) ? state.reminders : [],
     todos: Array.isArray(state?.todos) ? state.todos : [],
     bookmarks: Array.isArray(state?.bookmarks) ? state.bookmarks : [],
-    logs: Array.isArray(state?.logs) ? state.logs : []
+    logs: Array.isArray(state?.logs) ? state.logs : [],
+    reports: normalizeReports(state?.reports)
   };
 }
 

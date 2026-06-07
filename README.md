@@ -27,6 +27,11 @@ Lightweight Telegram agent for Cloudflare Workers. Commands are shown in Chinese
 - `删除日志 <编号|多个编号|全部>` - delete logs
 - `日报` - summarize today's logs and state
 - `周报` - summarize the last seven days
+- `订阅日报 <时间>` - send the daily report automatically
+- `取消日报` - stop the automatic daily report
+- `订阅周报 [周几] <时间>` - send the weekly report automatically
+- `取消周报` - stop the automatic weekly report
+- `订阅列表` - show report subscriptions
 - `搜索 <关键词>` - lightweight web search and summary
 - `网页 <链接>` - fetch and summarize a web page
 
@@ -56,6 +61,9 @@ Log and report examples:
 日志列表 交易
 日报
 周报
+订阅日报 21:30
+订阅周报 周日 21:30
+订阅列表
 ```
 
 ## Required Cloudflare secrets
